@@ -462,7 +462,9 @@ We only transition to the opening motion once torque is effectively zero, which 
       return;
     }
 
-
+<div align="center">
+  <img width="800" height="800" alt="image" src="https://github.com/user-attachments/assets/3b799a9c-e2db-4ba0-b496-4757a5c5b0b1" />
+</div>
 ## Back to original position
 
 This phase returns the vise safely to fully open position. We again use the jerk-limited setpoint generator so motion is smooth and bounded. Jam detection remains enabled because unexpected resistance can also occur while opening (e.g., debris or mechanical binding).
