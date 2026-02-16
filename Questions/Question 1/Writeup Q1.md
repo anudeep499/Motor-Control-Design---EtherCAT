@@ -301,4 +301,214 @@ This is the real-hardware “don’t trust data” safety layer. If EtherCAT com
       if (!op_enabled) return;
 
 
+## Jam Detection & Jam fault
+
+his is a key real-hardware safety feature: a vise might hit an unexpected obstruction or misaligned part. In that case, continuing to push in position mode can generate excessive force or damage. The jam detector looks for a signature: “still far from goal” but torque is high and velocity is near zero for a persistent duration. That combination indicates that motion has stalled against resistance.
+
+If jam is detected, we latch into a fault behavior and compute a small backoff goal. The backoff reduces force, reduces risk, and prevents the system from “digging in.” In jam fault, we keep behavior simple and safe: go back to Position mode and command a gentle jerk-limited backoff to relieve force. We still use the mode manager to confirm we’re actually in position mode before trusting position commands. That prevents incorrect output interpretation during transitions.
+
+      auto MaybeJamDetect = [&](int32_t goal_counts) {
+        const int32_t d_counts = AbsI32(goal_counts - pos);
+        const double d_mm = CountsToMm(d_counts);
     
+        const bool far = (d_mm > P.jam_min_dist_mm);
+        const bool tq_hi = (std::abs(g.tq_f_mNm) >= P.jam_torque_threshold_mNm);
+        const bool v_small = (std::abs(vel_f_mm_s) <= P.jam_vel_small_mm_s);
+    
+        if (!g.jam_latched && far && tq_hi && v_small) g.jam_timer_s += dt;
+        else g.jam_timer_s = 0.0;
+    
+        if (!g.jam_latched && g.jam_timer_s >= P.jam_persist_s) {
+          g.jam_latched = true;
+          g.phase = Phase::kJamFault;
+    
+          const int dir = (goal_counts > pos) ? 1 : -1;
+          const int32_t backoff = MmToCounts(P.jam_backoff_mm) * dir;
+          g.jam_backoff_goal_counts = ClampI32(pos - backoff, kMinPositionCounts, kMaxPositionCounts);
+        }
+      };
+        case Phase::kJamFault: {
+      const bool mode_ok = ModeConfirmedActive(inputs, outputs, OperationMode::Position);
+      outputs->target_torque_milli_newton_meter = 0;
+      outputs->target_velocity_counts_per_second = 0;
+      if (!mode_ok) {
+        outputs->target_position_counts = pos;
+        return;
+      }
+      UpdateJerkLimitedSetpoint(inputs, dt, g.jam_backoff_goal_counts);
+      outputs->target_position_counts = ClampI32(
+          static_cast<int32_t>(std::llround(g.x_cmd)),
+          kMinPositionCounts, kMaxPositionCounts);
+      return;
+    }
+## Approaching the clamping mechanism
+
+This phase handles the “rapid close” requirement in the prompt. We use Position mode but generate a smooth setpoint, so the drive sees a realistic motion profile rather than step-like commands. The motion is fast when far away and becomes conservative as we approach the clamp position due to the distance-based limits and jerk scheduling inside UpdateJerkLimitedSetpoint.
+
+We also integrate safety monitoring during travel: jam detection runs continuously. Finally, we transition to a dedicated contact detection phase once we are within a narrow window around the clamp point, which prevents false contact detection earlier in travel and makes the logic robust and easy to tune.
+
+<div align="center">
+  <img width="800" height="800" alt="image" src="https://github.com/user-attachments/assets/0fd0a432-3447-41fa-afe0-7f1d888b8dc9" />
+</div>
+
+## Contact Detection(very important)
+
+This phase is designed to detect the moment the vise contacts the plates. Contact detection is done using a robust industrial pattern: check that torque is above a threshold and velocity is low and the condition persists for a minimum time. Using all three conditions prevents false triggers from noise, brief collisions, or transient friction events.
+
+We remain in Position mode during contact detection because it allows a controlled creep motion toward the expected clamp position while we watch torque build-up. Once contact is confirmed, we reset torque-ramp state and transition into torque mode clamping. That gives a clean separation: “motion planning in position mode” and “force regulation in torque mode.”
+
+    case Phase::kContactDetect: {
+      const bool mode_ok = ModeConfirmedActive(inputs, outputs, OperationMode::Position);
+      outputs->target_torque_milli_newton_meter = 0;
+      outputs->target_velocity_counts_per_second = 0;
+      if (!mode_ok) {
+        outputs->target_position_counts = pos;
+        return;
+      }
+
+      UpdateJerkLimitedSetpoint(inputs, dt, clamp_counts);
+      outputs->target_position_counts = ClampI32(
+          static_cast<int32_t>(std::llround(g.x_cmd)),
+          kMinPositionCounts, kMaxPositionCounts);
+
+      const bool tq_hi = (std::abs(g.tq_f_mNm) >= P.contact_torque_threshold_mNm);
+      const bool v_lo  = (std::abs(vel_f_mm_s) <= P.contact_vel_small_mm_s);
+
+      if (tq_hi && v_lo) g.contact_timer_s += dt;
+      else g.contact_timer_s = 0.0;
+
+      if (g.contact_timer_s >= P.contact_persist_s) {
+        g.phase = Phase::kClampRampTorque;
+        g.torque_cmd_Nm = 0.0;
+        g.clamp_ramp_timer_s = 0.0;
+        g.torque_stable_timer_s = 0.0;
+      }
+      return;
+    }
+
+
+## Clamping Mechanism
+
+This phase meets the “controlled clamping phase” requirement. We switch to Torque mode (with confirmation) because torque regulation is the correct way to achieve a repeatable final clamp force when compliance and friction vary(requirement was to maintain an effective clamp force of 12.5 Nm transmitted from the motor to vise). The torque ramp uses the shaped ramp + overshoot safety logic from UpdateTorqueCommand, which makes the approach smooth and reduces the chance of force spikes.
+
+We also implement an industrial-style “torque until stable” success condition. Instead of declaring success the moment torque crosses the threshold, we require that measured torque stays within tolerance for a stable duration (for ex 100 ms which is something we set and modify). This accounts for mechanical settling and sensor noise. Finally, a ramp timeout prevents the system from trying forever - if torque can’t reach target in time, we treat it as abnormal and move to a safe fault behavior.
+
+    case Phase::kClampRampTorque: {
+      const bool mode_ok = ModeConfirmedActive(inputs, outputs, OperationMode::Torque);
+      outputs->target_position_counts = pos;
+      outputs->target_velocity_counts_per_second = 0;
+      if (!mode_ok) {
+        outputs->target_torque_milli_newton_meter = 0;
+        return;
+      }
+
+      g.clamp_ramp_timer_s += dt;
+
+      const double T_target_motor_Nm = LeadScrewTorqueToMotorTorqueNm(P.target_leadscrew_torque_Nm);
+      UpdateTorqueCommand(dt, T_target_motor_Nm, tq_f_Nm);
+
+      const int32_t cmd_mNm = static_cast<int32_t>(std::llround(g.torque_cmd_Nm * 1000.0));
+      outputs->target_torque_milli_newton_meter =
+          ClampI16(cmd_mNm, kMinTorqueMilliNewtonMeter, kMaxTorqueMilliNewtonMeter);
+
+      const bool in_band = (std::abs(tq_f_Nm - T_target_motor_Nm) <= P.torque_tol_Nm);
+      if (in_band) g.torque_stable_timer_s += dt;
+      else g.torque_stable_timer_s = 0.0;
+
+      if (g.torque_stable_timer_s >= P.torque_stable_s) {
+        g.phase = Phase::kClampHoldTorque;
+        g.clamp_hold_timer_s = 0.0;
+      }
+
+      if (g.clamp_ramp_timer_s >= P.clamp_ramp_timeout_s) {
+        g.phase = Phase::kJamFault;
+        g.jam_latched = true;
+        g.jam_backoff_goal_counts = ClampI32(pos + MmToCounts(0.5), kMinPositionCounts, kMaxPositionCounts);
+      }
+
+      return;
+    }
+
+
+## Smooth unloading/Torque release
+
+Release is handled carefully to avoid “snap-back” or sudden unloading, which can be unsafe or can shift parts unexpectedly. We ramp torque down at a controlled rate, then snap to zero near the end to prevent numerical dithering. This mirrors how real torque systems unload smoothly to avoid shock loads.
+
+We only transition to the opening motion once torque is effectively zero, which prevents the system from fighting itself (opening while still applying clamp torque). This sequencing matters in real clamp systems because it avoids unnecessary wear and reduces the chance of slipping or damaging the material.
+
+    case Phase::kReleaseTorque: {
+      const bool mode_ok = ModeConfirmedActive(inputs, outputs, OperationMode::Torque);
+      outputs->target_position_counts = pos;
+      outputs->target_velocity_counts_per_second = 0;
+      if (!mode_ok) {
+        outputs->target_torque_milli_newton_meter = 0;
+        return;
+      }
+
+      const double eT = 0.0 - g.torque_cmd_Nm;
+      const double dT = std::clamp(eT, -P.release_Tdot_Nm_s * dt, P.release_Tdot_Nm_s * dt);
+      g.torque_cmd_Nm += dT;
+
+      if (std::abs(g.torque_cmd_Nm) < 0.01) g.torque_cmd_Nm = 0.0;
+
+      const int32_t cmd_mNm = static_cast<int32_t>(std::llround(g.torque_cmd_Nm * 1000.0));
+      outputs->target_torque_milli_newton_meter =
+          ClampI16(cmd_mNm, kMinTorqueMilliNewtonMeter, kMaxTorqueMilliNewtonMeter);
+
+      if (g.torque_cmd_Nm == 0.0) {
+        g.phase = Phase::kOpenToHome;
+        g.jam_timer_s = 0.0;
+      }
+      return;
+    }
+
+
+## Back to original position
+
+This phase returns the vise safely to fully open position. We again use the jerk-limited setpoint generator so motion is smooth and bounded. Jam detection remains enabled because unexpected resistance can also occur while opening (e.g., debris or mechanical binding).
+
+We use a robust “goal reached” condition: not just “position near goal,” but also “velocity small” and “stable for time.” That avoids declaring success while still moving or oscillating. Once settled, we return to idle and clear start/process flags so the cycle is ready for the next command — a clean industrial-style cycle completion.
+
+    case Phase::kOpenToHome: {
+      const bool mode_ok = ModeConfirmedActive(inputs, outputs, OperationMode::Position);
+      outputs->target_torque_milli_newton_meter = 0;
+      outputs->target_velocity_counts_per_second = 0;
+      if (!mode_ok) {
+        outputs->target_position_counts = pos;
+        return;
+      }
+
+      MaybeJamDetect(open_counts);
+
+      UpdateJerkLimitedSetpoint(inputs, dt, open_counts);
+      outputs->target_position_counts = ClampI32(
+          static_cast<int32_t>(std::llround(g.x_cmd)),
+          kMinPositionCounts, kMaxPositionCounts);
+
+      const int32_t err = open_counts - pos;
+      const bool pos_close = (AbsI32(err) <= kTargetReachedToleranceCounts);
+      const bool vel_small = (std::abs(vel_f_mm_s) <= 5.0);
+
+      if (pos_close && vel_small) g.settle_timer_s += dt;
+      else g.settle_timer_s = 0.0;
+
+      if (g.settle_timer_s >= 0.050) {
+        g.phase = Phase::kIdle;
+        g_start_cycle.store(false, std::memory_order_relaxed);
+        g_process_done.store(false, std::memory_order_relaxed);
+        g.jam_latched = false;
+        g.settle_timer_s = 0.0;
+      }
+      return;
+    }
+
+
+# Conclusion
+
+This implementation reflects a real-world, hardware-conscious control strategy for an EtherCAT-driven servo system operating a mechanical vise. Rather than relying on simplified trajectory commands or idealized assumptions, the controller is structured as an industrial finite-state machine that explicitly separates motion control, contact detection, force regulation, and safety recovery behaviors.
+
+Throughout the design, emphasis was placed on robustness under real hardware conditions: variable cycle times, EtherCAT jitter, sensor noise, mechanical compliance, friction variability, drive saturation, and unexpected obstruction. Motion is governed by adaptive jerk scheduling and distance-based velocity limits to balance speed and stability. Contact detection is based on multi-condition persistence logic rather than single-sample thresholds. Clamping force is achieved using a shaped torque ramp with overshoot protection and stability qualification. Release and reopening are sequenced carefully to prevent shock loading or control conflicts.
+
+The result is a controller that moves aggressively when safe, transitions smoothly into controlled force regulation, qualifies clamp success based on stability rather than instantaneous thresholds, and always maintains deterministic fallback behavior. The architecture reflects how production clamp systems are designed — prioritizing repeatability, safety, and predictable state transitions over theoretical optimality.
+
+This solution demonstrates not only control theory knowledge, but practical system-level thinking aligned with real industrial servo systems.
