@@ -70,3 +70,235 @@ Some important assumptions have also been made explicit like, worm ratio and eff
   <img width="800" height="800" alt="image" src="https://github.com/user-attachments/assets/e6ae4cbc-4b2f-412e-9186-824571ec2432" />
 </div>
 
+## Phase definitions
+
+This enum defines the clamp operation as an explicit finite-state machine (FSM), which is the standard industrial approach for sequences involving mode switching, safety transitions, and multiple goals. Each phase has a single responsibility: travel quickly, detect contact, clamp, hold, release, return home. That makes the logic easier to reason about and makes failure handling more deterministic. Separating phases is also important for “real hardware correctness” because different control modes (Position vs Torque) are appropriate at different times. By modeling the phases explicitly, we can ensure the controller never accidentally ramps torque while still in position travel, or keeps creeping forward after contact when it should instead transition into a torque-regulated clamp.
+
+    enum class Phase {
+      kIdle,
+      kCloseToClampPos,
+      kContactDetect,
+      kClampRampTorque,
+      kClampHoldTorque,
+      kReleaseTorque,
+      kOpenToHome,
+      kJamFault
+    };
+
+
+## Persistent Controlller state
+
+This state structure is what makes the control loop a real control system instead of a purely combinational function. Real controllers must remember phase, timers, filtered signals, and setpoint generator internal states across cycles. For example, the jerk-limited trajectory needs x_cmd/v_cmd/a_cmd to produce a smooth S-curve-like motion; filtering needs previous filter output; contact detection requires persistence timers; torque clamp requires tracking the commanded torque ramp.
+
+    struct State {
+      bool inited = false;
+      Phase phase = Phase::kIdle;
+    
+      OperationMode last_req_mode = OperationMode::Position;
+      int req_streak = 0;
+    
+      double x_cmd = 0.0;
+      double v_cmd = 0.0;
+      double a_cmd = 0.0;
+    
+      double vel_f_counts_s = 0.0;
+      double tq_f_mNm = 0.0;
+    
+      double tq_hist0 = 0.0, tq_hist1 = 0.0, tq_hist2 = 0.0;
+    
+      double contact_timer_s = 0.0;
+      double torque_stable_timer_s = 0.0;
+      double clamp_ramp_timer_s = 0.0;
+      double clamp_hold_timer_s = 0.0;
+      double jam_timer_s = 0.0;
+      double settle_timer_s = 0.0;
+    
+      double torque_cmd_Nm = 0.0;
+    
+      bool jam_latched = false;
+      int32_t jam_backoff_goal_counts = 0;
+    
+      int32_t goal_requested_counts = 0;
+      int32_t goal_applied_counts = 0;
+      double goal_update_timer_s = 0.0;
+    };
+    
+    static State g;
+
+## Mode confirmation manager(very important)
+
+In real drives, switching modes is not an instantaneous and you request a mode and must confirm that the drive has actually entered it before you trust the meaning of commands. If you start sending torque commands while the drive is still in position mode, behavior can be wrong and can mess up the behaviour of the motor. The function enforces a strict policy to always request mode continuously, and only return “confirmed” after both a debounce streak and drive confirmation (operation_mode_display). The streak requirement is important because EtherCAT status words can transiently flicker during enable/disable or while a drive is busy. Requiring consecutive confirmations avoids false positives. This helps protect against issues like bus jitter or brief invalid frames(very commonly experienced in similar robotics applications).
+
+    inline bool ModeConfirmedActive(const DriveInputs& in, DriveOutputs* out, OperationMode desired) {
+      if (desired != g.last_req_mode) {
+        g.last_req_mode = desired;
+        g.req_streak = 1;
+      } else {
+        g.req_streak++;
+      }
+      out->operation_mode = static_cast<int8_t>(desired);
+    
+      const bool streak_ok = (g.req_streak >= kModeChangeDebounceCycles);
+      const bool display_ok = (in.operation_mode_display == static_cast<int8_t>(desired));
+      return streak_ok && display_ok;
+    }
+
+## Adaptive jerk optimization
+
+This implements the “optimized and innovative” improvement of instead of using a single jerk limit everywhere, jerk is scheduled continuously based on risk. Far from the target, we allow higher jerk so the system responds quickly(as expected in the assesment Problem Statement); near the target, jerk is reduced so the final approach is gentle and less likely to excite resonances or cause overshoot. This mirrors how many high-end motion controllers behave (“soft landing” motion feel). We also incorporate real-hardware signals into this scheduling: if we’re in an edge zone near end stops, jerk is capped to the most conservative value; if the drive reports an internal limit is active, we scale jerk down further. That means the controller adapts automatically to “warning signs” from hardware and becomes safer without needing a separate fault event add-on!
+    
+    inline double ScheduledJmaxCounts(double dist_to_goal_counts, bool edge_zone, bool internal_limit) {
+      const double d_mm = std::abs(dist_to_goal_counts) / static_cast<double>(kEncoderCountsPerMotorRevolution);
+      const double s = std::clamp(d_mm / std::max(1e-3, P.j_scale_mm), 0.0, 1.0);
+    
+      double j_mm_s3 = P.j_near_mm_s3 + (P.j_far_mm_s3 - P.j_near_mm_s3) * s;
+      if (edge_zone) j_mm_s3 = std::min(j_mm_s3, P.j_edge_mm_s3);
+      if (internal_limit) j_mm_s3 *= P.internal_limit_scale;
+    
+      return Mmps3ToCountsps3(j_mm_s3);
+    }
+
+## Jerk-limited position setpoint generator (S-curve inspired)
+
+This is the heart of the smooth motion strategy. There are many simple trajectory planning methods like S-curve, trapezoidal etc. From already existing knowledge and current research there are many techniques to plan the trajectory of the vise but using a modified more specific version of some of these trajectory planning algorithms is important! Even though we command the drive in Position Mode, we do not jump the target position abruptly. Instead, we generate a smooth position setpoint(x_cmd) by integrating a jerk-limited acceleration  velocity  position chain. This produces an “S-curve inspired” motion profile: acceleration changes smoothly (limited jerk), velocity ramps up smoothly, and the final approach is stable and gentle.
+
+We also implement the “three phase approach” you wanted: the distance-to-goal thresholds choose different velocity/acceleration limits (fast / medium / creep), and the jerk is continuously scheduled. On top of that, the logic reduces aggressiveness near end stops and when internal limits activate. The result is a controller that moves quickly when it’s safe, but automatically becomes conservative when risk increases — exactly the behavior expected from robust industrial motion systems.
+
+    inline void UpdateJerkLimitedSetpoint(const DriveInputs& in,
+                                          double dt,
+                                          int32_t goal_counts) {
+      const int32_t pos = ClampI32(in.position_actual_counts, kMinPositionCounts, kMaxPositionCounts);
+      const int32_t goal = ClampI32(goal_counts, kMinPositionCounts, kMaxPositionCounts);
+    
+      const int32_t d_counts = goal - static_cast<int32_t>(std::llround(g.x_cmd));
+      const double d_mm = std::abs(d_counts) / static_cast<double>(kEncoderCountsPerMotorRevolution);
+    
+      double vmax_mm_s, amax_mm_s2;
+      if (d_mm > P.d_far_mm) {
+        vmax_mm_s = P.vmax_fast_mm_s;
+        amax_mm_s2 = P.amax_fast_mm_s2;
+      } else if (d_mm > P.d_near_mm) {
+        vmax_mm_s = P.vmax_med_mm_s;
+        amax_mm_s2 = P.amax_med_mm_s2;
+      } else {
+        vmax_mm_s = P.vmax_creep_mm_s;
+        amax_mm_s2 = P.amax_creep_mm_s2;
+      }
+    
+      const int32_t edge_zone_counts = MmToCounts(P.edge_zone_mm);
+      const bool near_min = (pos - kMinPositionCounts) <= edge_zone_counts;
+      const bool near_max = (kMaxPositionCounts - pos) <= edge_zone_counts;
+      const bool goal_near_min = (goal - kMinPositionCounts) <= edge_zone_counts;
+      const bool goal_near_max = (kMaxPositionCounts - goal) <= edge_zone_counts;
+      const bool edge_zone = near_min || near_max || goal_near_min || goal_near_max;
+    
+      const bool internal_limit = Bit(in.status_word, StatusWordBit::kInternalLimitActive);
+    
+      if (edge_zone) {
+        vmax_mm_s = std::min(vmax_mm_s, P.vmax_creep_mm_s);
+        amax_mm_s2 = std::min(amax_mm_s2, P.amax_creep_mm_s2);
+      }
+      if (internal_limit) {
+        vmax_mm_s *= P.internal_limit_scale;
+        amax_mm_s2 *= P.internal_limit_scale;
+      }
+    
+      const double vmax = MmpsToCountsps(vmax_mm_s);
+      const double amax = Mmps2ToCountsps2(amax_mm_s2);
+      const double jmax = ScheduledJmaxCounts(d_counts, edge_zone, internal_limit);
+    
+      const double e = static_cast<double>(goal) - g.x_cmd;
+      const int dir = Sign(e);
+    
+      double v_des = (dir == 0) ? 0.0 : (static_cast<double>(dir) * vmax);
+    
+      const double v_err = v_des - g.v_cmd;
+      double a_target = (dt > 0.0) ? (v_err / dt) : 0.0;
+      a_target = std::clamp(a_target, -amax, amax);
+    
+      const double da_max = jmax * dt;
+      const double da = std::clamp(a_target - g.a_cmd, -da_max, da_max);
+      g.a_cmd += da;
+    
+      g.v_cmd += g.a_cmd * dt;
+      g.v_cmd = std::clamp(g.v_cmd, -vmax, vmax);
+    
+      g.x_cmd += g.v_cmd * dt;
+      g.x_cmd = std::clamp(g.x_cmd,
+                           static_cast<double>(kMinPositionCounts),
+                           static_cast<double>(kMaxPositionCounts));
+    }
+    
+    
+
+## Torque Ramp Strategy
+
+The ramp rate is automatically high when far from target torque and automatically low near target, which reduces overshoot and improves repeatability across changing friction/compliance. This is much more reusable than a fixed two-stage scheme because it scales to different torque targets without rewriting the logic.
+
+We also implement a protective “soft landing” mechanism: if measured torque overshoots the target by more than a threshold, we immediately stop increasing torque and back off slightly. That prevents dangerous force spikes caused by compliance settling or a sudden change in stiffness. Finally, torque commands are clamped to drive constraints, which is a basic but critical real-hardware safety property.
+
+    inline double ShapedTorqueRampRate(double eT_Nm) {
+      const double a = std::clamp(std::abs(eT_Nm) / std::max(1e-6, P.Tscale_Nm), 0.0, 1.0);
+      return P.Tdot_slow_Nm_s + (P.Tdot_fast_Nm_s - P.Tdot_slow_Nm_s) * a;
+    }
+    
+    inline void UpdateTorqueCommand(double dt, double T_target_Nm, double T_meas_Nm) {
+      const double overshoot = (T_meas_Nm - T_target_Nm);
+      if (overshoot > P.torque_overshoot_Nm) {
+        g.torque_cmd_Nm = std::max(0.0, g.torque_cmd_Nm - P.torque_backoff_Nm);
+        return;
+      }
+    
+      const double eT = T_target_Nm - g.torque_cmd_Nm;
+    
+      const double Tdot_max = ShapedTorqueRampRate(eT);
+      const double dT = std::clamp(eT, -Tdot_max * dt, Tdot_max * dt);
+    
+      g.torque_cmd_Nm += dT;
+    
+      const double T_max = static_cast<double>(kMaxTorqueMilliNewtonMeter) * 1e-3;
+      const double T_min = static_cast<double>(kMinTorqueMilliNewtonMeter) * 1e-3;
+      g.torque_cmd_Nm = std::clamp(g.torque_cmd_Nm, T_min, T_max);
+    }
+    
+## Clamping using time & Safety defaults
+
+This prologue is designed for safe real-hardware behavior. First we clamp 'dt' so even if the scheduler jitters, our filters, ramp increments, and persistence timers remain bounded. Next we set safe defaults before doing anything else, so any early return (faults, not enabled, mode switching) still outputs a safe command (hold position, zero torque/velocity).
+
+The initialization block is “bumpless” because we start the trajectory state (x_cmd) at the measured position. That avoids sudden setpoint jumps that could cause a step command to the drive. We also initialize filter states to the current measured signals to avoid filter startup transients that could mistakenly look like a torque spike or velocity change.
+
+## Fault Handling
+
+This is the real-hardware “don’t trust data” safety layer. If EtherCAT communication fails, input data may be stale or full of errors. The safe policy is to stop motion decisions and simply hold position with zero torque/velocity commands. This prevents runaway motion that could occur if the controller keeps integrating setpoints using old sensor feedback. Also in the code, by returning early if not operation-enabled, we ensure we never try to execute motion logic before the drive is in the correct state. That avoids undefined behavior and makes the control loop deterministic: the high-level phases only run when the hardware is actually ready.
+    
+      const int32_t pos = ClampI32(inputs.position_actual_counts, kMinPositionCounts, kMaxPositionCounts);
+    
+      if (inputs.fault_code == static_cast<uint16_t>(FaultCode::Communication)) {
+        outputs->operation_mode = static_cast<int8_t>(OperationMode::Position);
+        outputs->target_position_counts = pos;
+        outputs->target_torque_milli_newton_meter = 0;
+        outputs->target_velocity_counts_per_second = 0;
+        return;
+      }
+    
+      const bool fault = Bit(inputs.status_word, StatusWordBit::kFault);
+      if (fault) {
+        outputs->operation_mode = static_cast<int8_t>(OperationMode::Torque);
+        outputs->target_torque_milli_newton_meter = 0;
+        outputs->target_position_counts = pos;
+        outputs->control_word |= ControlWordBit::kFaultReset;
+        outputs->control_word |= ControlWordBit::kQuickStopInactive;
+        return;
+      }
+      outputs->control_word |= ControlWordBit::kEnableVoltage;
+      const bool ready = Bit(inputs.status_word, StatusWordBit::kReadyToSwitchOn);
+      const bool switched_on = Bit(inputs.status_word, StatusWordBit::kSwitchedOn);
+      const bool op_enabled = Bit(inputs.status_word, StatusWordBit::kOperationEnabled);
+    
+      if (ready) outputs->control_word |= ControlWordBit::kSwitchOn;
+      if (switched_on) outputs->control_word |= ControlWordBit::kEnableOperation;
+    
+      if (!op_enabled) return;
+
+
+    
