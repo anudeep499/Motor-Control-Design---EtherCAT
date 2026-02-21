@@ -31,9 +31,9 @@ So frequency response is basically a structured way of understanding how your re
 Magnitude response tells us how big the output is compared to the input at each frequency.
 
 Let’s say we measure
-- 5 Hz → 0 dB (normal tracking)
-- 75 Hz → 8 dB (about 2.5× amplification)
-- 200 Hz → − 20 dB (very small response)
+- 5 Hz -> 0 dB (normal tracking)
+- 75 Hz -> 8 dB (about 2.5× amplification)
+- 200 Hz -> − 20 dB (very small response)
 
 At 5 Hz, the vise tracks nicely and behaves as expected. So the input amplitude for that frequency is maintained and it oscillates with the same intensity and is easily controllable by our controller.
 
@@ -80,4 +80,27 @@ So as frequency increases, even a fixed delay starts looking like significant ph
 
 Now here’s the key point for stability:
 
-If gain crossover happens at 20 Hz and phase there is −130, you have about 50 phase margin & that’s fine and comfortable. If you increase gain and crossover shifts to 40 Hz where phase is −170, now you only have about 10 phase margin — that’s risky and likely to oscillate. **So phase response directly tells you how close you are to instability.**
+If gain crossover happens at 20 Hz and phase there is −130, you have about 50 phase margin & that’s fine and comfortable. If you increase gain and crossover shifts to 40 Hz where phase is −170, now you only have about 10 phase margin so that’s risky and likely to oscillate and create instabilities and these are the oscillations we take care as controls engineers. **So phase response directly tells you how close you are to instability.**
+
+
+# Implementation in Real Hardware
+
+In a real system like the vise, we don’t guess stability — we measure it. To characterize frequency response, we inject a small sinusoidal torque signal (for example ±0.2 Nm) and sweep frequency from 1 Hz to 200 Hz while measuring velocity or position. Using FFT, we compute the magnitude ratio and phase shift at each frequency and plot a Bode plot.
+
+From this, we might identify:
+
+First resonance at ~80 Hz
+
+Gain crossover around 20 Hz
+
+Phase margin ~45°
+
+Noise amplification above 150 Hz
+
+If resonance is 80 Hz, we typically keep control bandwidth around 15–25 Hz (about 1/3 to 1/5 of resonance). This prevents exciting structural vibration in the screw and jaws, which would otherwise cause chatter or long-term wear during 12.5 Nm clamping.
+
+This approach improves reliability because we avoid operating near resonance, reducing mechanical stress and vibration. It also improves serviceability — if, over time, resonance shifts (say from 80 Hz to 70 Hz due to wear or lubrication changes), re-measuring frequency response immediately reveals it. That makes it both a tuning tool and a diagnostic tool.
+
+Students or engineers typically determine frequency response by applying sine sweeps, chirp signals, or PRBS excitation and analyzing the output using FFT tools (MATLAB, Python, etc.). This gives a data-driven way to tune gains instead of relying on trial-and-error.
+
+So frequency and magnitude response are not abstract theory — they are practical tools that allow us to design a stable, robust, and long-lasting clamp system.
