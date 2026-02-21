@@ -85,22 +85,38 @@ If gain crossover happens at 20 Hz and phase there is −130, you have about 50 
 
 # Implementation in Real Hardware
 
-In a real system like the vise, we don’t guess stability — we measure it. To characterize frequency response, we inject a small sinusoidal torque signal (for example ±0.2 Nm) and sweep frequency from 1 Hz to 200 Hz while measuring velocity or position. Using FFT, we compute the magnitude ratio and phase shift at each frequency and plot a Bode plot.
+In a real system like the vise, we don’t guess stability — we measure it. To characterize frequency response, we inject a small sinusoidal torque input (for example +/- 0.2 Nm) and sweep frequency from 1 Hz to 200 Hz while measuring velocity or position. Using Fast Fourier Transforms, we compute the magnitude ratio and phase shift at each frequency and plot a Bode plot.
 
 From this, we might identify:
+- First resonance at ~ around 75 Hz
+- Gain crossover frequency at which the magnitude intersects the X axis
+- Phase margin from the phase crossover angle(-180)
+- Noise amplification above 150 Hz
 
-First resonance at ~80 Hz
+If resonance is 75 Hz, we typically keep control bandwidth around 15–25 Hz (about 1/3 to 1/5 of resonance). This prevents exciting structural vibration in the screw and jaws, which would otherwise cause chatter or long-term wear during 12.5 Nm clamping.
 
-Gain crossover around 20 Hz
+This approach improves reliability because we avoid operating near resonance, reducing mechanical stress and vibration. It also improves serviceability — if, over time, resonance shifts (say from 80 Hz to 70 Hz due to wear or lubrication changes), re-measuring frequency response immediately reveals it. That makes it both a tuning tool and a diagnostic tool. We Students/Engineers typically determine frequency response by applying sine sweeps, chirp signals, or PRBS excitation and analyzing the output using FFT tools (MATLAB, Python, etc.). This gives a data-driven way to tune gains instead of relying on trial-and-error.
 
-Phase margin ~45°
+**So frequency and magnitude response are not abstract theory — they are practical tools that allow us to design a stable, robust, and long-lasting clamp system.
+**
+The General Theoretical approach would be:
 
-Noise amplification above 150 Hz
+Derive the system transfer function G(s) from the motor inertia, damping, stiffness, and load dynamics. Substitute s = jω to obtain the frequency response G(jω).
 
-If resonance is 80 Hz, we typically keep control bandwidth around 15–25 Hz (about 1/3 to 1/5 of resonance). This prevents exciting structural vibration in the screw and jaws, which would otherwise cause chatter or long-term wear during 12.5 Nm clamping.
+Compute:
 
-This approach improves reliability because we avoid operating near resonance, reducing mechanical stress and vibration. It also improves serviceability — if, over time, resonance shifts (say from 80 Hz to 70 Hz due to wear or lubrication changes), re-measuring frequency response immediately reveals it. That makes it both a tuning tool and a diagnostic tool.
+      Magnitude response = |G(jω)|
+      Phase response = angle G(jω)
 
-Students or engineers typically determine frequency response by applying sine sweeps, chirp signals, or PRBS excitation and analyzing the output using FFT tools (MATLAB, Python, etc.). This gives a data-driven way to tune gains instead of relying on trial-and-error.
+Plot magnitude (in dB) and phase versus frequency (log scale) to generate the Bode plot.
 
-So frequency and magnitude response are not abstract theory — they are practical tools that allow us to design a stable, robust, and long-lasting clamp system.
+Use the same G(jω) to construct the Nyquist plot by plotting the real part versus imaginary part of G(jω).
+
+Use the characteristic equation:
+
+      1 + K G(s) = 0
+
+to analyze Root Locus and observe how closed-loop poles move as gain K varies.
+
+
+
