@@ -1,3 +1,4 @@
+# **QUESTION 1**
 # What is Frequency Response & what does it represent
 
 When we talk about frequency response in a real system like our motor-driven vise, what we’re really asking is:
@@ -118,5 +119,72 @@ Use the characteristic equation:
 
 to analyze Root Locus and observe how closed-loop poles move as gain K varies.
 
+# **QUESTION 2**
+
+System states are the minimum set of internal variables that completely describe the dynamic condition of a system at any given moment. In a motor-driven vise, the primary states include:
+- position
+- velocity
+- motor torque (or current).
+
+These states define how the system is moving and how it will evolve next. If we know the current states, we can mathematically predict future behavior using the system model. For example, if the vise is at 20 mm but still moving inward at high velocity, we can predict overshoot. If it is at 20 mm with near-zero velocity and rising torque, we can predict contact and force buildup. States essentially capture the “dynamic memory” of the system. Just like how we use states to apply Markov Decision process algorithms and how we implement state action algorithms similarly we use current states to understand future performance and accuracy.
+
+In the context of the clamping problem, states are directly used for control logic and safety decisions:
+
+- Position state -> determines distance to clamp target
+- Velocity state -> helps detect contact (velocity drops while torque increases)
+- Torque state -> verifies that 12.5 Nm clamp force is achieved
+- **Derived quantities -> acceleration, power, stiffness estimation(very important parameters especially low level control!)
+**
+
+For example, during contact detection, the controller checks whether torque rises while velocity decreases & this combination of states indicates physical contact. During torque hold, stable torque over time confirms proper clamping. These states also allow prediction: if velocity is high near the clamp point, the controller can reduce aggressiveness to avoid overshoot.
+
+Accurate state measurement or estimation is critical, especially during the final clamping phase where force precision matters. If torque feedback is noisy or biased, the system may under-clamp or over-clamp. If velocity estimation is poor, contact may be detected incorrectly. When states cannot be directly measured (for example, internal compliance deflection), observers or filters are used to estimate them reliably. Root locus analysis helps determine how these state dynamics behave as controller gain increases. Gain represents how strongly the controller reacts to state error. If gain is too high, system poles move toward instability and oscillations occur; if properly selected, the states remain stable and well-damped. Therefore, accurate state knowledge combined with appropriate gain tuning ensures stable, predictable, and safe clamp operation.
+
+# **QUESTION 3 & 4**
+
+Under-sampling in a control system occurs when the digital controller samples the plant too slowly relative to the system’s dynamic movements. In a real motor-driven vise, the analog physical signals (torque, position, velocity) are converted into digital values using an ADC, processed in discrete time, and sent back through a D/A or digital drive interface. Once sampling occurs, the system no longer sees a continuous signal — it sees discrete snapshots spaced by dt. If the sampling frequency fs is too low relative to the highest significant mechanical frequency, the discrete system misrepresents the real dynamics. So for example a system with frequency 30 Hz and you sample it at a frequency 90 Hz, we are accurately able to determine the dynamics of the system but if it were moving at a frequency of 60 Hz then maybe our sampling frequency would not be sufficient and might mislead our control system to thinking the system is moving at a different frequency. According to the Nyquist Sampling Theorem, we require:
+
+      fs >= 2 * f_max
+
+where f_max is the highest frequency present in the signal. However, in control systems, simply satisfying Nyquist is not sufficient — we typically require 5–10 times margin for stability and phase preservation.
+
+From a time-domain perspective, aliasing means the sampled waveform no longer resembles the true oscillation. For example, if the vise has a mechanical resonance at 60 Hz and we sample at 90 Hz, the Nyquist frequency is 50 Hz. The 60 Hz oscillation cannot be represented correctly and “folds” into a lower apparent frequency. The aliased frequency is:
+
+      f_alias = mod(f_signal − n * fs)
 
 
+So 60 Hz sampled at 90 Hz appears as 30 Hz. In the frequency domain, this is called spectral folding. The controller now believes there is a 30 Hz disturbance — dangerously close to the intended control bandwidth. This can cause the controller to amplify vibration instead of damp it, leading to chatter during clamping.
+
+Under-sampling also introduces effective delay. Digital control behaves approximately like it has half a sample period of delay. If:
+- sampling period dt = 10 ms
+- effective delay approximately equals 5 ms
+
+The phase lag added is:
+
+      phase_lag = -360 * f * T_delay
+
+At 30 Hz crossover, this equals approximately -36 degrees, significantly reducing phase margin. Reduced phase margin shifts closed-loop poles toward instability towrds the -180 degree mark as seen in Root Locus & Bode plot), potentially causing oscillations in torque hold. Additionally, coarse sampling degrades state estimation. Velocity calculated as:
+
+      v[k] = ( x[k] - x[k-1] ) / dt
+
+becomes noisy when dt is large, which compromises contact detection and clamp stability.
+
+For the vise described earlier (resonance approximately 60 Hz, torque bandwidth approximately 20 Hz), proper sampling criteria would include:
+- Sampling >= 10 * control bandwidth, meaning >= 300 Hz
+- Preferably >= 5 to 10 * resonance frequency, meaning 300 to 600 Hz
+- Practical choice: 1 kHz EtherCAT loop
+- Use anti-aliasing filtering before ADC conversion
+- Keep total delay small enough to preserve >= 45 degrees phase margin
+
+This ensures the controller operates safely within the baseband (the frequency region of interest below resonance) and avoids spectral folding.
+
+Other techniques I've used/worked with in the past are:
+
+- **Zero-Order Hold (ZOH)**: The digital output stage holds the control signal between samples, which introduces additional high-frequency phase lag and reduces phase margin.
+
+- **Discrete-Time Pole Mapping:** Continuous poles map to discrete poles using
+      z = exp(s * T).
+  If the sampling period T is too large, poles move closer to the unit circle, reducing damping and potentially causing instability.
+- **Computational Jitter:** EtherCAT timing jitter behaves like variable delay, which further reduces phase margin and can cause oscillations or limit cycles in torque hold.
+
+- **Anti-Aliasing Filter Design:** The analog filter cutoff should be below Nyquist, typically around 0.4 to 0.5 times the sampling frequency, balancing noise attenuation with added phase lag.
