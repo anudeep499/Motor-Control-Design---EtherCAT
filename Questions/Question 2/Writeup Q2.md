@@ -188,3 +188,23 @@ Other techniques I've used/worked with in the past are:
 - **Computational Jitter:** EtherCAT timing jitter behaves like variable delay, which further reduces phase margin and can cause oscillations or limit cycles in torque hold.
 
 - **Anti-Aliasing Filter Design:** The analog filter cutoff should be below Nyquist, typically around 0.4 to 0.5 times the sampling frequency, balancing noise attenuation with added phase lag.
+
+
+
+
+# Question 5
+
+
+**Feedforward and feedback** are two complementary control strategies. Feedback control measures the output, compares it to a reference, and corrects any error. It is reactive, instantaneous and ensures stability even when disturbances or modeling errors exist. 
+**Feedforward control**, on the other hand, predicts the required input based on a model of the system and applies it directly without waiting for error. It is proactive and improves performance when the system dynamics and information about efficiencies are calibrated and measured.
+
+In the motor-driven vise, **Feedback control** is used during torque clamping. For example:
+
+- Desired clamp torque = 12.5 Nm
+- Measured torque = 11 Nm
+- Error = +1.5 Nm
+
+The controller increases motor current to eliminate the error. Feedback is essential here because plate stiffness, friction, and compliance vary. Without feedback, the system could under-clamp or over-clamp. So when we are in a situation to provide enough weight to the prediction of the model we operate using real-time error values and gradually reduce those errors and reach the required goal state.
+
+However, feedback alone can be slow and may introduce oscillations if gains are too high!
+
