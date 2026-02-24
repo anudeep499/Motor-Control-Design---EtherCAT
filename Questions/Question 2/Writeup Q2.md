@@ -208,3 +208,89 @@ The controller increases motor current to eliminate the error. Feedback is essen
 
 However, feedback alone can be slow and may introduce oscillations if gains are too high!
 
+Feedforward can be used during motion phases. For example:
+
+If the leadscrew pitch and efficiency are known, We can calculate the approximate motor torque needed to generate 12.5 Nm at the screw.
+
+Similarly, during position motion:
+
+We can add inertia compensation:
+
+      torque_ff = J * desired_acceleration
+
+This reduces lag and minimizes tracking error before feedback needs to correct it. Feedforward improves speed and smoothness, especially in jerk-limited motion.
+
+We can also define for which use-cases we would use Feedback and for which we would use Feedforward control
+
+Use feedback when:
+- Disturbances are unpredictable
+- Load changes frequently
+- Exact modeling is difficult
+- Stability is critical
+
+Use feedforward when:
+- The system model is reasonably accurate
+- Motion is repetitive
+- You want faster tracking
+- You want to reduce feedback gain requirements
+
+In the vise:
+
+Torque hold -> primarily feedback
+
+Motion planning -> feedforward + feedback
+
+In real industrial systems, the best strategy is usually a combination:
+
+      control_output = feedforward_term + feedback_term
+
+Feedforward provides the bulk expected input. Feedback corrects residual error. However, they should not be combined blindly:
+- If the model is inaccurate, feedforward can inject incorrect torque.
+- Too much feedforward may reduce error signal and hide instability.
+- Improper combination can reduce phase margin.
+
+In the vise system, a good design would use:
+- Feedforward for predicted clamp torque or motion inertia
+- Feedback to guarantee precise 12.5 Nm and reject disturbances
+
+This produces a fast, stable, and robust clamp.
+
+During closing motion (position control), we generate a planned trajectory:
+- Desired position: x_ref
+- Desired velocity: v_ref
+- Desired acceleration: a_ref
+
+The motor torque command is:
+
+      T_cmd = T_ff + T_fb
+
+
+We estimate required torque from system physics:
+
+      T_ff = J_eq * a_ref + B_eq * v_ref
+
+Where:
+
+      J_eq = equivalent inertia
+      
+      B_eq = damping
+
+Example:
+
+      If J_eq = 0.01 kg·m2 and a_ref = 50 rad/s2 ->
+      T_ff = 0.5 Nm
+
+
+This supplies the expected torque immediately.
+
+We correct tracking error:
+
+      T_fb = Kp (x_ref − x_meas) + Kd (v_ref − v_meas)
+
+This compensates:
+- Friction changes
+- Load variation
+- Modeling error
+
+
+
