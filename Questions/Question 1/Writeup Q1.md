@@ -65,6 +65,7 @@ This is the core of real-time hardware project where all critical behaviors are 
 
 Some important assumptions have also been made explicit like, worm ratio and efficiency are unknown in the prompt, so I expose them as tunable knobs. That is realistic engineering you often start with a nominal estimate (for ex 0.7 efficiency) and then calibrate from measurements. Parameters also encode safety intent - edge zones slow down near end stops, internal-limit scaling backs off if the drive reports saturation, and timeouts prevent the system from applying torque indefinitely if something goes wrong.
 
+Also in this system, I would primarily rely on EtherCAT process data for torque, position, velocity, and status information because modern servo drives internally sample at much higher frequencies (typically 10 – 20 kHz) and expose filtered, calibrated signals over the fieldbus. With a 1 ms EtherCAT cycle, the data latency is acceptable relative to the 15–25 Hz control bandwidth used for clamping. **However, for safety-critical signals such as hard end-stops or emergency stops, I would use direct hardware inputs to a safety-rated controller.** EtherCAT provides sufficient resolution and determinism for control-level decisions, while hardware interlocks provide independent fail-safe protection.
 
 <div align="center">
   <img width="800" height="800" alt="image" src="https://github.com/user-attachments/assets/e6ae4cbc-4b2f-412e-9186-824571ec2432" />
@@ -516,3 +517,4 @@ Throughout the design, emphasis was placed on robustness under real hardware con
 The result is a controller that moves aggressively when safe, transitions smoothly into controlled force regulation, qualifies clamp success based on stability rather than instantaneous thresholds, and always maintains deterministic fallback behavior. The architecture reflects how production clamp systems are designed — prioritizing repeatability, safety, and predictable state transitions over theoretical optimality.
 
 This solution demonstrates not only control theory knowledge, but practical system-level thinking aligned with real industrial servo systems.
+
