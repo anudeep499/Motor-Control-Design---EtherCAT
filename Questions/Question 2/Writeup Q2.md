@@ -111,7 +111,7 @@ Compute:
 
 Plot magnitude (in dB) and phase versus frequency (log scale) to generate the Bode plot.
 
-Use the same G(jω) to construct the Nyquist plot by plotting the real part versus imaginary part of G(jω).
+Use the same G(jw) to construct the Nyquist plot by plotting the real part versus imaginary part of G(jw).
 
 Use the characteristic equation:
 
@@ -133,8 +133,7 @@ In the context of the clamping problem, states are directly used for control log
 - Position state -> determines distance to clamp target
 - Velocity state -> helps detect contact (velocity drops while torque increases)
 - Torque state -> verifies that 12.5 Nm clamp force is achieved
-- **Derived quantities -> acceleration, power, stiffness estimation(very important parameters especially low level control!)
-**
+- **Derived quantities -> acceleration, power, stiffness estimation(very important parameters especially low level control!)**
 
 For example, during contact detection, the controller checks whether torque rises while velocity decreases & this combination of states indicates physical contact. During torque hold, stable torque over time confirms proper clamping. These states also allow prediction: if velocity is high near the clamp point, the controller can reduce aggressiveness to avoid overshoot.
 
