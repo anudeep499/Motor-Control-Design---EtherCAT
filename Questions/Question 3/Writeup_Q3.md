@@ -1,3 +1,5 @@
 # Question 3
 
+**A TI Sitara–class** is the option I’d pick for this EtherCAT master + real-time clamp controller, mainly because it hits the “industrial timing first” sweet spot: deterministic I/O (very peripheral-friendly) + enough compute for our 1 kHz control law, without the scheduling/jitter headaches we fight on a big Linux/GPU module and without the resource constraints of a small MCU when we add EtherCAT master duties, safety interlocks, logging, and diagnostics.
 
+If I had to justify my choice using all the data I have from the datasheet I would say: EtherCAT success is less about peak GHz and more about bounded latency + predictable scheduling. Our control loop is 1 ms nominal, and what breaks real systems is not average cycle time but the tails (rare 2–5 ms slips) that cause bad contact detection, late torque backoff, and mode-switch confirmation weirdness. Sitara-style industrial SoCs are built for this exact problem: “do Ethernet/EtherCAT + deterministic real-time tasks + basic Linux services” reliably.
