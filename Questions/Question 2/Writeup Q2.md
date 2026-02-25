@@ -98,8 +98,8 @@ If resonance is 75 Hz, we typically keep control bandwidth around 15–25 Hz (ab
 
 This approach improves reliability because we avoid operating near resonance, reducing mechanical stress and vibration. It also improves serviceability — if, over time, resonance shifts (say from 80 Hz to 70 Hz due to wear or lubrication changes), re-measuring frequency response immediately reveals it. That makes it both a tuning tool and a diagnostic tool. We Students/Engineers typically determine frequency response by applying sine sweeps, chirp signals, or PRBS excitation and analyzing the output using FFT tools (MATLAB, Python, etc.). This gives a data-driven way to tune gains instead of relying on trial-and-error.
 
-**So frequency and magnitude response are not abstract theory — they are practical tools that allow us to design a stable, robust, and long-lasting clamp system.
-**
+**So frequency and magnitude response are not abstract theory — they are practical tools that allow us to design a stable, robust, and long-lasting clamp system.**
+
 The General Theoretical approach would be:
 
 Derive the system transfer function G(s) from the motor inertia, damping, stiffness, and load dynamics. Substitute s = jw to obtain the frequency response G(jw).
