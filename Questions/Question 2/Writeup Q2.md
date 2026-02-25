@@ -102,12 +102,12 @@ This approach improves reliability because we avoid operating near resonance, re
 **
 The General Theoretical approach would be:
 
-Derive the system transfer function G(s) from the motor inertia, damping, stiffness, and load dynamics. Substitute s = jω to obtain the frequency response G(jω).
+Derive the system transfer function G(s) from the motor inertia, damping, stiffness, and load dynamics. Substitute s = jw to obtain the frequency response G(jw).
 
 Compute:
 
-      Magnitude response = |G(jω)|
-      Phase response = angle G(jω)
+      Magnitude response = |G(jw)|
+      Phase response = angle G(jw)
 
 Plot magnitude (in dB) and phase versus frequency (log scale) to generate the Bode plot.
 
