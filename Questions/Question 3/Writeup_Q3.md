@@ -8,5 +8,4 @@ If I had to justify my choice using all the data I have from the datasheet I wou
     
 approaching one the AM625 provides ample headroom while maintaining predictable scheduling. Its industrial Ethernet subsystem DMA support hardware timers and real time Linux capability make it well suited for bounded 1 millisecond cyclic communication while the servo drive continues closing the high rate inner torque loop internally. This results in a robust scalable production ready architecture optimized for determinism rather than raw clock speed.
 
-
 [This is a table which compares specs ranging from utility, task partitioning/multi-threading capabilities to cost and reliability](https://docs.google.com/spreadsheets/d/17CtbpPfysyF49Yq5wPucbXkDnLgll3z3DkbJzHRhJPw/edit?gid=0#gid=0)
